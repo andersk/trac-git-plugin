@@ -65,7 +65,12 @@ class GitCore:
 
         return stdout_data
 
+    def cat_file_batch(self):
+        return self.__pipe('cat-file', '--batch', stdin=PIPE, stdout=PIPE)
+
     def __getattr__(self, name):
+        if name[0] == '_' or name in ['cat_file_batch']:
+            raise AttributeError, name
         return partial(self.__execute, name.replace('_','-'))
 
     __is_sha_pat = re.compile(r'[0-9A-Fa-f]*$')
@@ -209,10 +214,16 @@ class Storage:
         self.__commit_msg_cache = SizedDict(200)
         self.__commit_msg_lock = Lock()
 
+        self.__cat_file_pipe = None
+
 
 
     def __del__(self):
         self.logger.debug("PyGIT.Storage instance %d destructed" % id(self))
+
+        if self.__cat_file_pipe is not None:
+            self.__cat_file_pipe.stdin.close()
+            self.__cat_file_pipe.wait()
 
     #
     # cache handling
@@ -385,6 +396,20 @@ class Storage:
         "get current HEAD commit id"
         return self.verifyrev("HEAD")
 
+    def cat_file(self, kind, sha):
+        if self.__cat_file_pipe is None:
+            self.__cat_file_pipe = self.repo.cat_file_batch()
+
+        self.__cat_file_pipe.stdin.write(sha + '\n')
+        self.__cat_file_pipe.stdin.flush()
+        _sha, _type, _size = self.__cat_file_pipe.stdout.readline().split()
+
+        if _type != kind:
+            raise TracError("internal error (got unexpected object kind '%s')" % k)
+
+        size = int(_size)
+        return self.__cat_file_pipe.stdout.read(size + 1)[:size]
+
     def verifyrev(self, rev):
         "verify/lookup given revision object and return a sha id or None if lookup failed"
         rev = str(rev)
@@ -406,7 +431,7 @@ class Storage:
             return rc
 
         if rc in tag_db:
-            sha=self.repo.cat_file("tag", rc).split(None, 2)[:2]
+            sha=self.cat_file("tag", rc).split(None, 2)[:2]
             if sha[0] != 'object':
                 self.logger.debug("unexpected result from 'git-cat-file tag %s'" % rc)
                 return None
@@ -521,7 +546,7 @@ class Storage:
                 return result[0], dict(result[1])
 
             # cache miss
-            raw = self.repo.cat_file("commit", commit_id)
+            raw = self.cat_file("commit", commit_id)
             raw = unicode(raw, self.get_commit_encoding(), 'replace')
             lines = raw.splitlines()
 
@@ -542,7 +567,7 @@ class Storage:
             return result[0], dict(result[1])
 
     def get_file(self, sha):
-        return cStringIO.StringIO(self.repo.cat_file("blob", str(sha)))
+        return cStringIO.StringIO(self.cat_file("blob", str(sha)))
 
     def get_obj_size(self, sha):
         sha = str(sha)
